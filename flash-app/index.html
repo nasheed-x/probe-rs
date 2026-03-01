@@ -440,13 +440,17 @@
 
 <!-- ═══ Toolbar ═══ -->
 <div class="toolbar">
+    <button class="btn btn-ghost" id="btn-connect">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1v6M4.5 3.5L8 7l3.5-3.5"/><rect x="2" y="8" width="12" height="6" rx="1.5"/><circle cx="5" cy="11" r=".8" fill="currentColor"/><circle cx="8" cy="11" r=".8" fill="currentColor"/></svg>
+        Connect Probe
+    </button>
+    <button class="btn btn-ghost" id="btn-detect" disabled>
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 4v4l3 2"/></svg>
+        Detect Target
+    </button>
     <button class="btn btn-flash" id="btn-flash" disabled>
         <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M9.5.5L3.5 9h4l-1 6.5 6-8.5h-4z"/></svg>
         Flash
-    </button>
-    <button class="btn btn-ghost" id="btn-detect">
-        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 4v4l3 2"/></svg>
-        Detect Target
     </button>
     <div class="spacer"></div>
     <div class="status-chip" id="probe-status">
@@ -584,6 +588,7 @@
 
     // ── DOM refs ──
     const $log = document.getElementById('log');
+    const $btnConnect = document.getElementById('btn-connect');
     const $btnFlash = document.getElementById('btn-flash');
     const $btnDetect = document.getElementById('btn-detect');
     const $probeStatus = document.getElementById('probe-status');
@@ -630,33 +635,69 @@
     }
     start().catch(e => appendLog(`Init error: ${e}`, 'log-red'));
 
+    // ── Connect probe (WebUSB requestDevice dialog) ──
+    $btnConnect.addEventListener('click', async () => {
+        if (flashing) return;
+        if (!navigator.usb) {
+            appendLog('WebUSB not supported in this browser. Use Chrome or Edge.', 'log-red');
+            return;
+        }
+
+        appendLog('Opening USB device picker...', 'log-blue');
+
+        try {
+            // requestDevice() triggers the browser's permission dialog.
+            // We use a broad filter — probe-rs will identify the probe type.
+            // Common debug probe VIDs: 0x0483 (STLink), 0x1366 (J-Link), 0x0d28 (DAPLink),
+            // 0x1fc9 (NXP), 0x2e8a (Raspberry Pi Debug Probe), 0x1a86 (WCH-Link)
+            const device = await navigator.usb.requestDevice({ filters: [
+                { vendorId: 0x0483 },  // STMicroelectronics (ST-Link)
+                { vendorId: 0x1366 },  // SEGGER (J-Link)
+                { vendorId: 0x0d28 },  // ARM DAPLink
+                { vendorId: 0x2e8a },  // Raspberry Pi (Picoprobe / Debug Probe)
+                { vendorId: 0x1a86 },  // WCH (WCH-Link)
+                { vendorId: 0x303a },  // Espressif
+                { vendorId: 0x1fc9 },  // NXP
+                { classCode: 0xff },   // Vendor-specific (catches most CMSIS-DAP v2)
+            ]});
+
+            appendLog(`USB device paired: ${device.productName || 'Unknown'} (${hex4(device.vendorId)}:${hex4(device.productId)})`, 'log-green');
+
+            // Now list via probe-rs to get full probe info
+            const probesJson = await list_probes();
+            const probes = JSON.parse(probesJson);
+            if (probes.length > 0) {
+                probeInfo = probes[0];
+                $probeName.textContent = probeInfo.identifier;
+                $probeName.classList.remove('placeholder');
+                $probeVidPid.textContent = `${hex4(probeInfo.vendor_id)}:${hex4(probeInfo.product_id)}`;
+                $probeVidPid.classList.remove('placeholder');
+                $probeSerial.textContent = probeInfo.serial_number || '—';
+                $probeSerial.classList.remove('placeholder');
+                setProbeStatus('connected', probeInfo.identifier);
+                appendLog(`Probe: ${probeInfo.identifier} (${probeInfo.probe_type})`, 'log-green');
+                $btnDetect.disabled = false;
+            } else {
+                appendLog('Device paired but probe-rs did not recognize it as a debug probe.', 'log-yellow');
+                setProbeStatus('error', 'Unrecognized');
+            }
+        } catch (e) {
+            if (e.name === 'NotFoundError') {
+                appendLog('No device selected.', 'log-yellow');
+            } else {
+                appendLog(`Connect failed: ${e}`, 'log-red');
+                setProbeStatus('error', 'Error');
+            }
+        }
+    });
+
     // ── Detect target ──
     $btnDetect.addEventListener('click', async () => {
         if (flashing) return;
         $btnDetect.disabled = true;
-        appendLog('Scanning for probes...', 'log-blue');
+        appendLog('Auto-detecting target chip...', 'log-blue');
 
         try {
-            const probesJson = await list_probes();
-            const probes = JSON.parse(probesJson);
-            if (probes.length === 0) {
-                appendLog('No debug probe found. Connect a CMSIS-DAP v2 probe via USB.', 'log-red');
-                setProbeStatus('error', 'No probe');
-                $btnDetect.disabled = false;
-                return;
-            }
-
-            probeInfo = probes[0];
-            $probeName.textContent = probeInfo.identifier;
-            $probeName.classList.remove('placeholder');
-            $probeVidPid.textContent = `${hex4(probeInfo.vendor_id)}:${hex4(probeInfo.product_id)}`;
-            $probeVidPid.classList.remove('placeholder');
-            $probeSerial.textContent = probeInfo.serial_number || '—';
-            $probeSerial.classList.remove('placeholder');
-            setProbeStatus('connected', probeInfo.identifier);
-            appendLog(`Probe: ${probeInfo.identifier} (${probeInfo.probe_type})`, 'log-green');
-
-            appendLog('Auto-detecting target chip...', 'log-blue');
             const chip = await detect_target();
             detectedChip = chip;
             $targetChip.textContent = chip;
