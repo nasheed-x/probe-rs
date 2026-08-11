@@ -22,7 +22,7 @@ members = [
     "probe-rs-mi",
     "probe-rs-debug",
 ]
-exclude = ["probe-rs/tests/gpio-hal-blinky"]
+exclude = ["nusb", "probe-rs/tests/gpio-hal-blinky"]
 
 [workspace.dependencies]
 probe-rs = { path = "probe-rs", version = "0.28.0" }

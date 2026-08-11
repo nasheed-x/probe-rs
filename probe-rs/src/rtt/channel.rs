@@ -413,7 +413,14 @@ impl UpChannel {
                 break;
             }
 
-            core.read(self.0.info.buffer_start_pointer() + read, &mut buf[..count])
+            // RTT buffers are byte streams and may sit flush against a RAM-region
+            // boundary. Keep the target access byte-wide so an aligned bulk read
+            // cannot touch an adjacent word (some CMSIS-DAP/WebUSB + STM32H7
+            // combinations return a sticky AP fault at that boundary).
+            core.read_8(
+                self.0.info.buffer_start_pointer() + read,
+                &mut buf[..count],
+            )
                 .await?;
 
             total += count;

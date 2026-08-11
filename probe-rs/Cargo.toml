@@ -44,7 +44,7 @@ bitvec = "1"
 # ], path = "../../../hidapi-rs" }
 hidapi = { version = "2", default-features = false, features = [
     "linux-native",
-], git = "https://github.com/Yatekii/hidapi-rs", branch = "task/webusb" }
+], git = "https://github.com/Yatekii/hidapi-rs", rev = "cded1473ceabaf286a484c979dae86e1430fb74d" }
 ihex = "3.0"
 itertools = "0.14"
 jep106 = "0.3"
@@ -54,8 +54,7 @@ object = { version = "0.36", default-features = false, features = [
     "read_core",
     "std",
 ] }
-# nusb = { version = "0.2.0-beta", path = "../../../nusb" }
-nusb = { version = "0.2.0-beta", git = "https://github.com/Yatekii/nusb", branch = "task/webusb" }
+nusb = { version = "0.2.0-beta", path = "../nusb" }
 futures-lite = { version = "2", default-features = false }
 
 scroll = "0.12"

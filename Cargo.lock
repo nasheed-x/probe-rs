@@ -1777,7 +1777,7 @@ checksum = "befe65164a090041cdf6e0d21a0ec3198d856fbfe2b76e324a073e790bb49f8c"
 [[package]]
 name = "hidapi"
 version = "2.5.1"
-source = "git+https://github.com/Yatekii/hidapi-rs?branch=task%2Fwebusb#cded1473ceabaf286a484c979dae86e1430fb74d"
+source = "git+https://github.com/Yatekii/hidapi-rs?rev=cded1473ceabaf286a484c979dae86e1430fb74d#cded1473ceabaf286a484c979dae86e1430fb74d"
 dependencies = [
  "cc",
  "cfg-if",
@@ -2554,7 +2554,6 @@ checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 [[package]]
 name = "nusb"
 version = "0.2.0-beta"
-source = "git+https://github.com/Yatekii/nusb?branch=task%2Fwebusb#c9b2c934c86b250b60ca2c18fe130454595f502a"
 dependencies = [
  "atomic-waker",
  "core-foundation 0.9.4",

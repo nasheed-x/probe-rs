@@ -21,11 +21,50 @@ use crate::{
         AutoImplementJtagAccess, BatchCommand, DebugProbe, DebugProbeError, DebugProbeSelector,
         JtagAccess, JtagDriverState, ProbeFactory, WireProtocol,
         cmsisdap::commands::{
-            CmsisDapError, RequestError,
+            CmsisDapError, RequestError, SendError,
             general::info::{CapabilitiesCommand, PacketCountCommand, SWOTraceBufferSizeCommand},
         },
     },
 };
+
+async fn send_probe_info_with_retry<Req: commands::Request>(
+    device: &mut CmsisDapDevice,
+    request: &Req,
+) -> Result<(Req::Response, bool), CmsisDapError> {
+    let mut result = commands::send_command(device, request).await;
+    let mut saw_unexpected_answer = false;
+    for _ in 1..8 {
+        saw_unexpected_answer |= matches!(
+            &result,
+            Err(CmsisDapError::Send {
+                source: SendError::UnexpectedAnswer,
+                ..
+            })
+        );
+        let retry_without_timeout = matches!(
+            &result,
+            Err(CmsisDapError::Send {
+                source: SendError::NotEnoughData
+                    | SendError::UnexpectedAnswer
+                    | SendError::CommandIdMismatch(_, _),
+                ..
+            })
+        );
+        let retry_native_timeout = !cfg!(target_family = "wasm")
+            && matches!(
+                &result,
+                Err(CmsisDapError::Send {
+                    source: SendError::Timeout,
+                    ..
+                })
+            );
+        if !retry_without_timeout && !retry_native_timeout {
+            break;
+        }
+        result = commands::send_command(device, request).await;
+    }
+    result.map(|response| (response, saw_unexpected_answer))
+}
 
 use commands::{
     CmsisDapDevice, Status,
@@ -56,6 +95,50 @@ use commands::{
         configure::ConfigureRequest,
     },
 };
+
+const SHORT_INFO_WEBUSB_PROBE: (u16, u16) = (0x2e8a, 0x000c);
+
+fn needs_queued_capabilities_response(
+    allow_short_info_quirks: bool,
+    packet_count_saw_unexpected_answer: bool,
+    packet_count: u8,
+    response_length: u8,
+    raw_primary: u8,
+    swd_implemented: bool,
+) -> bool {
+    allow_short_info_quirks
+        && packet_count_saw_unexpected_answer
+        && response_length == 1
+        && !swd_implemented
+        && raw_primary == packet_count
+}
+
+#[cfg(test)]
+mod diode_webusb_tests {
+    use super::needs_queued_capabilities_response;
+
+    #[test]
+    fn clean_swd_capabilities_do_not_trigger_realign() {
+        assert!(!needs_queued_capabilities_response(
+            true, true, 1, 1, 1, true,
+        ));
+    }
+
+    #[test]
+    fn clean_capabilities_without_a_prior_mismatch_do_not_realign() {
+        assert!(!needs_queued_capabilities_response(
+            true, false, 2, 1, 2, false,
+        ));
+    }
+
+    #[test]
+    fn delayed_packet_count_reply_realigns_the_known_webusb_quirk() {
+        assert!(needs_queued_capabilities_response(
+            true, true, 2, 1, 2, false,
+        ));
+    }
+}
+
 use probe_rs_target::ScanChainElement;
 
 use std::{fmt::Write, time::Duration};
@@ -80,10 +163,15 @@ impl ProbeFactory for CmsisDapFactory {
         &self,
         selector: &DebugProbeSelector,
     ) -> Result<Box<dyn DebugProbe>, DebugProbeError> {
-        CmsisDap::new_from_device(tools::open_device_from_selector(selector).await?)
-            .await
-            .map(Box::new)
-            .map(DebugProbe::into_probe)
+        let allow_missing_transport_bits = cfg!(target_family = "wasm")
+            && (selector.vendor_id, selector.product_id) == SHORT_INFO_WEBUSB_PROBE;
+        CmsisDap::new_from_device(
+            tools::open_device_from_selector(selector).await?,
+            allow_missing_transport_bits,
+        )
+        .await
+        .map(Box::new)
+        .map(DebugProbe::into_probe)
     }
 
     async fn list_probes(&self) -> Vec<super::DebugProbeInfo> {
@@ -131,7 +219,10 @@ impl std::fmt::Debug for CmsisDap {
 }
 
 impl CmsisDap {
-    async fn new_from_device(mut device: CmsisDapDevice) -> Result<Self, DebugProbeError> {
+    async fn new_from_device(
+        mut device: CmsisDapDevice,
+        allow_missing_transport_bits: bool,
+    ) -> Result<Self, DebugProbeError> {
         // Discard anything left in buffer, as otherwise
         // we'll get out of sync between requests and responses.
         device.drain().await;
@@ -141,14 +232,38 @@ impl CmsisDap {
         let packet_size = device.find_packet_size().await? as u16;
 
         // Read remaining probe information.
-        let packet_count = commands::send_command(&mut device, &PacketCountCommand {}).await?;
-        let caps: Capabilities =
-            commands::send_command(&mut device, &CapabilitiesCommand {}).await?;
+        let (packet_count, packet_count_saw_unexpected_answer) =
+            send_probe_info_with_retry(&mut device, &PacketCountCommand {}).await?;
+        let (mut caps, _) =
+            send_probe_info_with_retry(&mut device, &CapabilitiesCommand {}).await?;
+        // If packet-count discovery succeeded with a delayed reply, another
+        // packet-count response can remain queued and look like a valid
+        // one-byte capabilities payload. Its raw value exactly matches the
+        // packet count; consume the already-queued capabilities reply without
+        // sending another command so the stream is aligned for SWD setup.
+        if needs_queued_capabilities_response(
+            allow_missing_transport_bits,
+            packet_count_saw_unexpected_answer,
+            packet_count,
+            caps.response_length,
+            caps.raw_primary,
+            caps.swd_implemented,
+        ) {
+            caps = commands::receive_command(&mut device, &CapabilitiesCommand {}).await?;
+        }
+        // A small number of CMSIS-DAP v2 implementations return capability
+        // metadata without either transport bit even though their bulk
+        // interface implements SWD. With no advertised transport to choose,
+        // prefer the CMSIS-DAP default instead of making the probe unusable.
+        if allow_missing_transport_bits && !caps.swd_implemented {
+            tracing::warn!("Probe omitted its SWD capability bit; assuming SWD support");
+            caps.swd_implemented = true;
+        }
         tracing::debug!("Detected probe capabilities: {:?}", caps);
         let mut swo_buffer_size = None;
         if caps.swo_uart_implemented || caps.swo_manchester_implemented {
-            let swo_size =
-                commands::send_command(&mut device, &SWOTraceBufferSizeCommand {}).await?;
+            let (swo_size, _) =
+                send_probe_info_with_retry(&mut device, &SWOTraceBufferSizeCommand {}).await?;
             swo_buffer_size = Some(swo_size as usize);
             tracing::debug!("Probe SWO buffer size: {}", swo_size);
         }

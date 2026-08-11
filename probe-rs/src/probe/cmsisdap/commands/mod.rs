@@ -224,6 +224,14 @@ impl CmsisDapDevice {
     pub(super) async fn drain(&self) {
         tracing::debug!("Draining probe of any pending data.");
 
+        // WebUSB has no transfer-cancellation primitive. Racing a speculative
+        // bulk IN against this 1 ms drain timeout leaves the browser transfer
+        // alive, so it consumes the response to the next real command and the
+        // CMSIS-DAP stream becomes permanently desynchronised.
+        #[cfg(target_family = "wasm")]
+        return;
+
+        #[cfg(not(target_family = "wasm"))]
         match self {
             CmsisDapDevice::V1 {
                 handle,
@@ -285,13 +293,30 @@ impl CmsisDapDevice {
         for repeat in 0..16 {
             tracing::debug!("Attempt {} to find packet size", repeat + 1);
             match send_command(self, &PacketSizeCommand {}).await {
-                Ok(size) => {
+                Ok(size) if size >= 8 => {
                     tracing::debug!("Success: packet size is {}", size);
                     self.set_packet_size(size as usize);
                     return Ok(size as usize);
                 }
+                Ok(size) => {
+                    tracing::warn!("Ignoring invalid CMSIS-DAP packet size {}", size);
+                }
 
-                // Ignore timeouts and retry.
+                // Ignore incomplete or stale discovery replies and retry. Some
+                // WebUSB probes need more than one DAP_Info exchange before the
+                // command stream and packet size are fully synchronized.
+                Err(CmsisDapError::Send {
+                    source:
+                        SendError::NotEnoughData
+                        | SendError::UnexpectedAnswer
+                        | SendError::CommandIdMismatch(_, _),
+                    ..
+                }) => (),
+
+                // Native USB can cancel a timed-out read before retrying.
+                // WebUSB cannot, so retrying there would leave an abandoned
+                // IN transfer capable of consuming the next response.
+                #[cfg(not(target_family = "wasm"))]
                 Err(CmsisDapError::Send {
                     source: SendError::Timeout,
                     ..
@@ -429,6 +454,18 @@ pub(crate) async fn send_command<Req: Request>(
         })
 }
 
+pub(crate) async fn receive_command<Req: Request>(
+    device: &mut CmsisDapDevice,
+    request: &Req,
+) -> Result<Req::Response, CmsisDapError> {
+    receive_command_inner(device, request)
+        .await
+        .map_err(|e| CmsisDapError::Send {
+            command_id: Req::COMMAND_ID,
+            source: e,
+        })
+}
+
 async fn send_command_inner<Req: Request>(
     device: &mut CmsisDapDevice,
     request: &Req,
@@ -461,7 +498,21 @@ async fn send_command_inner<Req: Request>(
     let _ = device.write(&buffer[..size]).await?;
     trace_buffer("Transmit buffer", &buffer[..size]);
 
-    // Read back response.
+    receive_command_inner(device, request).await
+}
+
+async fn receive_command_inner<Req: Request>(
+    device: &mut CmsisDapDevice,
+    request: &Req,
+) -> Result<Req::Response, SendError> {
+    let buffer_len: usize = match device {
+        CmsisDapDevice::V1 { report_size, .. } => *report_size + 1,
+        CmsisDapDevice::V2 {
+            max_packet_size, ..
+        } => *max_packet_size + 1,
+    };
+    let mut buffer = vec![0; buffer_len];
+
     let bytes_read = device.read(&mut buffer).await?;
     let response_data = &buffer[..bytes_read];
     trace_buffer("Receive buffer", response_data);
