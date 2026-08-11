@@ -1,0 +1,45 @@
+name: Diode WebUSB
+
+on:
+  push:
+    branches: [diode/webusb]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: diode-webusb-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: probe-rs tests + wasm32
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libudev-dev
+
+      - name: Install WebAssembly target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2.9.2
+
+      - name: Run probe-rs tests
+        run: cargo test -p probe-rs --all-features --locked --lib --tests
+
+      - name: Check WebUSB build
+        run: cargo check -p probe-rs --target wasm32-unknown-unknown --all-features --locked
